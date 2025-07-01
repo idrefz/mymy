@@ -8,3 +8,4 @@ shapely
 matplotlib
 streamlit_folium
 fiona
+pykml
