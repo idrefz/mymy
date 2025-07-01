@@ -33,57 +33,63 @@ def create_aligned_grids(gdf, grid_size=15.8):
     
     return gpd.GeoDataFrame(geometry=polygons, crs=gdf.crs)
 
-def create_fat_areas_aligned(grid_with_hp, gdf):
+def create_fat_areas(grid_with_hp, gdf):
+    """Hanya membuat FAT area untuk grid yang memiliki HP"""
     fat_areas = []
     homepass_groups = {}
     fat_index = 1
     
-    grid_with_hp['row'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.y / 15.8)))
-    grid_with_hp['col'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.x / 15.8)))
-    
-    grid_sorted = grid_with_hp.sort_values(['row', 'col'])
-    
-    current_fat = []
-    current_hp = 0
-    current_row = None
+    # Urutkan berdasarkan jumlah HP (descending)
+    grid_sorted = grid_with_hp.sort_values('homepass', ascending=False)
     
     for _, row in grid_sorted.iterrows():
-        if current_row is None:
-            current_row = row['row']
-        
-        if row['row'] != current_row or (current_hp + row['homepass'] > 16 and current_hp > 0):
-            if current_fat:
-                combined_geom = MultiPolygon(current_fat).convex_hull
+        if row['homepass'] == 0:
+            continue  # Skip grid tanpa HP
+            
+        if row['homepass'] >= 16:
+            # Grid dengan ≥16 HP menjadi FAT area sendiri
+            fat_areas.append({
+                'geometry': row['geometry'],
+                'homepass': row['homepass'],
+                'label': f'FAT {fat_index}',
+                'color': 'green'
+            })
+            
+            # Kelompokkan HP
+            points_in_grid = gdf[gdf.geometry.within(row['geometry'])]
+            homepass_groups[f'FAT {fat_index}'] = points_in_grid
+            fat_index += 1
+        else:
+            # Cari FAT area terdekat yang masih bisa menampung
+            added = False
+            for fat in fat_areas:
+                if fat['homepass'] + row['homepass'] <= 16:
+                    # Gabungkan geometry
+                    fat['geometry'] = MultiPolygon([fat['geometry'], row['geometry']]).convex_hull
+                    fat['homepass'] += row['homepass']
+                    
+                    # Gabungkan HP
+                    points_in_grid = gdf[gdf.geometry.within(row['geometry'])]
+                    if fat['label'] in homepass_groups:
+                        homepass_groups[fat['label']] = pd.concat([homepass_groups[fat['label']], points_in_grid])
+                    else:
+                        homepass_groups[fat['label']] = points_in_grid
+                    
+                    added = True
+                    break
+            
+            if not added:
+                # Buat FAT area baru untuk grid ini
                 fat_areas.append({
-                    'geometry': combined_geom,
-                    'homepass': current_hp,
+                    'geometry': row['geometry'],
+                    'homepass': row['homepass'],
                     'label': f'FAT {fat_index}',
-                    'color': 'green' if current_hp >= 16 else 'red'
+                    'color': 'red'  # Warna merah karena <16 HP
                 })
                 
-                points_in_fat = gdf[gdf.geometry.within(combined_geom)]
-                homepass_groups[f'FAT {fat_index}'] = points_in_fat
-                
+                points_in_grid = gdf[gdf.geometry.within(row['geometry'])]
+                homepass_groups[f'FAT {fat_index}'] = points_in_grid
                 fat_index += 1
-                current_fat = []
-                current_hp = 0
-            
-            current_row = row['row']
-        
-        current_fat.append(row['geometry'])
-        current_hp += row['homepass']
-    
-    if current_fat:
-        combined_geom = MultiPolygon(current_fat).convex_hull
-        fat_areas.append({
-            'geometry': combined_geom,
-            'homepass': current_hp,
-            'label': f'FAT {fat_index}',
-            'color': 'green' if current_hp >= 16 else 'red'
-        })
-        
-        points_in_fat = gdf[gdf.geometry.within(combined_geom)]
-        homepass_groups[f'FAT {fat_index}'] = points_in_fat
     
     return gpd.GeoDataFrame(fat_areas, crs=grid_with_hp.crs), homepass_groups
 
@@ -110,45 +116,47 @@ if uploaded_file:
     counts = joined.groupby(joined.index).size()
     grid['homepass'] = counts.reindex(grid.index, fill_value=0).astype(int)
     
-    # Filter grid dengan HP
+    # Filter hanya grid dengan HP
     grid_with_hp = grid[grid['homepass'] > 0].copy()
     
     if len(grid_with_hp) == 0:
         st.error("❌ Tidak ada titik Homepass yang masuk dalam grid manapun")
         st.stop()
     
-    # Buat FAT area yang teratur
-    fat_areas, homepass_groups = create_fat_areas_aligned(grid_with_hp, gdf)
+    # Buat FAT area hanya untuk grid dengan HP
+    fat_areas, homepass_groups = create_fat_areas(grid_with_hp, gdf)
     fat_areas_wgs = fat_areas.to_crs(epsg=4326)
     
     # Buat KML dengan struktur folder
     kml = simplekml.Kml()
     
-    # Folder FAT AREA
-    fat_folder = kml.newfolder(name="FAT AREA")
-    for _, row in fat_areas_wgs.iterrows():
-        poly = fat_folder.newpolygon(name=row['label'])
-        poly.style.polystyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
-        poly.style.linestyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
-        poly.style.linestyle.width = 2
-        
-        if hasattr(row.geometry, 'geoms'):
-            for geom in row.geometry.geoms:
-                poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
-        else:
-            poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
-        
-        poly.description = f"Jumlah HP: {row['homepass']}"
+    # Folder FAT AREA (hanya yang ada HP-nya)
+    if len(fat_areas) > 0:
+        fat_folder = kml.newfolder(name="FAT AREA")
+        for _, row in fat_areas_wgs.iterrows():
+            poly = fat_folder.newpolygon(name=row['label'])
+            poly.style.polystyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
+            poly.style.linestyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
+            poly.style.linestyle.width = 2
+            
+            if hasattr(row.geometry, 'geoms'):
+                for geom in row.geometry.geoms:
+                    poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
+            else:
+                poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
+            
+            poly.description = f"Jumlah HP: {row['homepass']}"
     
-    # Folder HOMEPASS
-    hp_folder = kml.newfolder(name="HOMEPASS")
-    for fat_name, points in homepass_groups.items():
-        fat_hp_folder = hp_folder.newfolder(name=fat_name)
-        points_wgs = points.to_crs(epsg=4326)
-        
-        for _, point in points_wgs.iterrows():
-            pnt = fat_hp_folder.newpoint(name=f"HP-{fat_name}")
-            pnt.coords = [(point.geometry.x, point.geometry.y)]
+    # Folder HOMEPASS (hanya untuk FAT area yang ada)
+    if len(homepass_groups) > 0:
+        hp_folder = kml.newfolder(name="HOMEPASS")
+        for fat_name, points in homepass_groups.items():
+            fat_hp_folder = hp_folder.newfolder(name=fat_name)
+            points_wgs = points.to_crs(epsg=4326)
+            
+            for _, point in points_wgs.iterrows():
+                pnt = fat_hp_folder.newpoint(name=f"HP-{fat_name}")
+                pnt.coords = [(point.geometry.x, point.geometry.y)]
     
     # Download KML
     kml_bytes = BytesIO(kml.kml().encode('utf-8'))
@@ -159,17 +167,19 @@ if uploaded_file:
         "application/vnd.google-earth.kml+xml"
     )
     
-    # Tampilkan statistik
+    # Tampilkan statistik hanya untuk FAT area yang ada
     st.subheader("📊 Statistik FAT AREA")
     
-    stats = []
-    for _, row in fat_areas.iterrows():
-        stats.append({
-            'FAT AREA': row['label'],
-            'Jumlah HP': row['homepass'],
-            'Status': 'Hijau (≥16 HP)' if row['color'] == 'green' else 'Merah (<16 HP)',
-            'Luas (m²)': round(row.geometry.area, 2),
-            'Bentuk': 'Horizontal' if row.geometry.bounds[3]-row.geometry.bounds[1] < row.geometry.bounds[2]-row.geometry.bounds[0] else 'Vertikal'
-        })
-    
-    st.dataframe(pd.DataFrame(stats))
+    if len(fat_areas) > 0:
+        stats = []
+        for _, row in fat_areas.iterrows():
+            stats.append({
+                'FAT AREA': row['label'],
+                'Jumlah HP': row['homepass'],
+                'Status': 'Hijau (≥16 HP)' if row['color'] == 'green' else 'Merah (<16 HP)',
+                'Luas (m²)': round(row.geometry.area, 2)
+            })
+        
+        st.dataframe(pd.DataFrame(stats))
+    else:
+        st.info("Tidak ada FAT AREA yang teridentifikasi")
