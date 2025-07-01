@@ -7,7 +7,6 @@ import simplekml
 from io import BytesIO
 import zipfile
 import math
-from collections import deque
 
 st.set_page_config(layout="wide")
 st.title("📍 Grid Identifikasi Homepass (Max 16 per Area 250m²)")
@@ -25,9 +24,11 @@ def create_aligned_grids(gdf, grid_size=15.8):
     bounds = gdf.total_bounds
     minx, miny, maxx, maxy = bounds
     
+    # Hitung jumlah grid horizontal dan vertikal
     cols = math.ceil((maxx - minx) / grid_size)
     rows = math.ceil((maxy - miny) / grid_size)
     
+    # Buat grid yang teratur
     polygons = []
     for i in range(cols):
         for j in range(rows):
@@ -35,85 +36,56 @@ def create_aligned_grids(gdf, grid_size=15.8):
             y = miny + j * grid_size
             polygons.append(box(x, y, x + grid_size, y + grid_size))
     
-    grid = gpd.GeoDataFrame(geometry=polygons, crs=gdf.crs)
-    grid['row'] = grid.geometry.apply(lambda g: int(round(g.centroid.y / grid_size)))
-    grid['col'] = grid.geometry.apply(lambda g: int(round(g.centroid.x / grid_size)))
-    
-    return grid
+    return gpd.GeoDataFrame(geometry=polygons, crs=gdf.crs)
 
-def find_adjacent_grids(grid, current_idx, visited):
-    """Mencari grid yang adjacent (atas, bawah, kiri, kanan)"""
-    directions = [(-1,0), (1,0), (0,-1), (0,1)]  # atas, bawah, kiri, kanan
-    current = grid.loc[current_idx]
-    adjacent = []
-    
-    for dr, dc in directions:
-        adj_row, adj_col = current['row'] + dr, current['col'] + dc
-        candidate = grid[(grid['row'] == adj_row) & (grid['col'] == adj_col)]
-        
-        if not candidate.empty:
-            adj_idx = candidate.index[0]
-            if adj_idx not in visited and grid.loc[adj_idx]['homepass'] > 0:
-                adjacent.append(adj_idx)
-    
-    return adjacent
-
-def create_optimized_fat_areas(grid_with_hp, gdf):
-    """Membuat FAT area dengan penggabungan optimal"""
+def create_fat_areas_aligned(grid_with_hp, gdf):
+    """Membuat FAT area yang sejajar dan teratur"""
     fat_areas = []
     homepass_groups = {}
     fat_index = 1
-    visited = set()
     
-    # Prioritaskan grid dengan HP terbanyak
-    sorted_indices = grid_with_hp.sort_values('homepass', ascending=False).index
+    # Identifikasi baris grid
+    grid_with_hp['row'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.y / 15.8)))
+    grid_with_hp['col'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.x / 15.8)))
     
-    for idx in sorted_indices:
-        if idx in visited or grid_with_hp.loc[idx]['homepass'] == 0:
-            continue
+    # Urutkan berdasarkan baris dan kolom
+    grid_sorted = grid_with_hp.sort_values(['row', 'col'])
+    
+    current_fat = []
+    current_hp = 0
+    current_row = None
+    
+    for _, row in grid_sorted.iterrows():
+        if current_row is None:
+            current_row = row['row']
         
-        # Mulai FAT area baru
-        current_fat = [grid_with_hp.loc[idx]['geometry']]
-        current_hp = grid_with_hp.loc[idx]['homepass']
-        visited.add(idx)
-        
-        # Cari grid adjacent yang bisa digabung
-        queue = deque(find_adjacent_grids(grid_with_hp, idx, visited))
-        
-        while queue and current_hp < 16:
-            adj_idx = queue.popleft()
-            
-            if adj_idx in visited:
-                continue
+        # Jika pindah baris atau sudah mencapai 16 HP
+        if row['row'] != current_row or (current_hp + row['homepass'] > 16 and current_hp > 0):
+            # Simpan FAT area sebelumnya
+            if current_fat:
+                combined_geom = MultiPolygon(current_fat).convex_hull
+                fat_areas.append({
+                    'geometry': combined_geom,
+                    'homepass': current_hp,
+                    'label': f'FAT {fat_index}',
+                    'color': 'green' if current_hp >= 16 else 'red'
+                })
                 
-            adj_hp = grid_with_hp.loc[adj_idx]['homepass']
-            
-            # Cek apakah bisa digabung tanpa melebihi 16 HP
-            if current_hp + adj_hp <= 16:
-                current_fat.append(grid_with_hp.loc[adj_idx]['geometry'])
-                current_hp += adj_hp
-                visited.add(adj_idx)
+                # Kelompokkan Homepass
+                points_in_fat = gdf[gdf.geometry.within(combined_geom)]
+                homepass_groups[f'FAT {fat_index}'] = points_in_fat
                 
-                # Tambahkan tetangga baru ke queue
-                queue.extend(find_adjacent_grids(grid_with_hp, adj_idx, visited))
-        
-        # Cek grid terisolir (kurang dari 16 HP tapi tidak ada tetangga)
-        if current_hp < 16 and not queue:
-            # Cari grid terdekat dalam radius 3 grid
-            current_center = grid_with_hp.loc[idx]['geometry'].centroid
-            nearby_grids = grid_with_hp[
-                (grid_with_hp.geometry.centroid.distance(current_center) <= 3*15.8) & 
-                (~grid_with_hp.index.isin(visited)) &
-                (grid_with_hp['homepass'] > 0)
-            ]
+                fat_index += 1
+                current_fat = []
+                current_hp = 0
             
-            for _, row in nearby_grids.iterrows():
-                if current_hp + row['homepass'] <= 16:
-                    current_fat.append(row['geometry'])
-                    current_hp += row['homepass']
-                    visited.add(row.name)
+            current_row = row['row']
         
-        # Buat FAT area
+        current_fat.append(row['geometry'])
+        current_hp += row['homepass']
+    
+    # Tambahkan FAT area terakhir
+    if current_fat:
         combined_geom = MultiPolygon(current_fat).convex_hull
         fat_areas.append({
             'geometry': combined_geom,
@@ -122,11 +94,8 @@ def create_optimized_fat_areas(grid_with_hp, gdf):
             'color': 'green' if current_hp >= 16 else 'red'
         })
         
-        # Kelompokkan Homepass
         points_in_fat = gdf[gdf.geometry.within(combined_geom)]
         homepass_groups[f'FAT {fat_index}'] = points_in_fat
-        
-        fat_index += 1
     
     return gpd.GeoDataFrame(fat_areas, crs=grid_with_hp.crs), homepass_groups
 
@@ -160,8 +129,8 @@ if uploaded_file:
         st.error("❌ Tidak ada titik Homepass yang masuk dalam grid manapun")
         st.stop()
     
-    # Buat FAT area yang optimal
-    fat_areas, homepass_groups = create_optimized_fat_areas(grid_with_hp, gdf)
+    # Buat FAT area yang teratur
+    fat_areas, homepass_groups = create_fat_areas_aligned(grid_with_hp, gdf)
     fat_areas_wgs = fat_areas.to_crs(epsg=4326)
     
     # Buat ZIP output
@@ -175,10 +144,10 @@ if uploaded_file:
                 poly.style.linestyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
                 poly.style.linestyle.width = 2
                 
-                if hasattr(row.geometry, 'geoms'):
+                if hasattr(row.geometry, 'geoms'):  # MultiPolygon
                     for geom in row.geometry.geoms:
                         poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
-                else:
+                else:  # Polygon
                     poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
                 
                 poly.description = f"Jumlah HP: {row['homepass']}"
@@ -209,18 +178,12 @@ if uploaded_file:
     
     stats = []
     for _, row in fat_areas.iterrows():
-        bounds = row.geometry.bounds
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
-        
         stats.append({
             'FAT AREA': row['label'],
             'Jumlah HP': row['homepass'],
             'Status': 'Hijau (≥16 HP)' if row['color'] == 'green' else 'Merah (<16 HP)',
             'Luas (m²)': round(row.geometry.area, 2),
-            'Lebar (m)': round(width, 1),
-            'Tinggi (m)': round(height, 1),
-            'Grid Terpakai': len(homepass_groups[row['label']])
+            'Bentuk': 'Horizontal' if row.geometry.bounds[3]-row.geometry.bounds[1] < row.geometry.bounds[2]-row.geometry.bounds[0] else 'Vertikal'
         })
     
     st.dataframe(pd.DataFrame(stats))
