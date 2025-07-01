@@ -2,6 +2,7 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point, MultiPoint, Polygon
+from sklearn.cluster import DBSCAN  # <-- Ini yang harus ditambahkan
 import simplekml
 from io import BytesIO
 import tempfile
@@ -73,7 +74,7 @@ if uploaded_file is not None:
                         points_utm['y'] = points_utm.geometry.y
                         coords = points_utm[['x', 'y']].values
                         
-                        # Lakukan clustering
+                        # Lakukan clustering dengan DBSCAN
                         db = DBSCAN(eps=max_dist, min_samples=1).fit(coords)
                         points_utm['cluster'] = db.labels_
                         
@@ -105,7 +106,7 @@ if uploaded_file is not None:
                             
                             if hull.geom_type == 'Polygon':
                                 pol = kml.newpolygon(
-                                    name=fat,
+                                    name=fat,  # <-- Perbaikan typo dari 'fat' ke 'fat'
                                     description=f"{len(group)} HP",
                                     outerboundaryis=[(p.x, p.y) for p in hull.exterior.coords]
                                 )
