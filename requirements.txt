@@ -1,5 +1,7 @@
 streamlit
-geopandas
-scikit-learn
-simplekml
-
+geopandas 
+pandas 
+scikit-learn 
+simplekml 
+pyproj 
+shapely
