@@ -4,41 +4,47 @@ import pandas as pd
 from shapely.geometry import Point, MultiPoint, Polygon
 from sklearn.cluster import DBSCAN
 import simplekml
-from io import BytesIO
+from io import BytesIO, StringIO
 import tempfile
 import os
 
 st.title('Pengelompokan FAT Area dari KML')
 
-def read_kml(file):
+def read_kml(uploaded_file):
+    """Membaca file KML yang diupload dengan penanganan error yang lebih baik"""
     try:
-        return gpd.read_file(file, driver='KML')
+        # Coba baca langsung dari file yang diupload
+        with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        # Baca file dengan geopandas
+        gdf = gpd.read_file(tmp_path, driver='KML')
+        
+        # Hapus file sementara
+        os.unlink(tmp_path)
+        
+        return gdf
+    
     except Exception as e:
-        st.warning(f"Gagal baca dengan pyogrio: {str(e)}. Mencoba metode alternatif...")
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
-                tmp.write(file.getvalue())
-                tmp_path = tmp.name
-            
-            gdf = gpd.read_file(tmp_path, driver='KML')
-            os.unlink(tmp_path)
-            return gdf
-        except Exception as e:
-            st.error(f"Gagal membaca file KML: {str(e)}")
-            return None
+        st.error(f"Gagal membaca file KML: {str(e)}")
+        return None
 
 # Upload file
 uploaded_file = st.file_uploader("Upload file KML berisi HomePass", type=['kml'])
 
 if uploaded_file is not None:
+    # Baca file KML
     gdf = read_kml(uploaded_file)
     
     if gdf is not None and not gdf.empty:
         st.success(f"Berhasil memuat {len(gdf)} fitur")
+        
+        # Tampilkan preview data
         st.subheader("Preview Data")
         st.write(gdf.head())
         
-        # Ekstrak semua titik
+        # Ekstrak semua titik (handle Point dan LineString)
         all_points = []
         for geom in gdf.geometry:
             if geom.geom_type == 'Point':
@@ -52,11 +58,11 @@ if uploaded_file is not None:
         else:
             points_gdf = gpd.GeoDataFrame(geometry=all_points, crs=gdf.crs)
             
-            # Konversi ke UTM
+            # Konversi ke UTM untuk perhitungan jarak akurat
             utm_epsg = 32748  # UTM zone 48S (Indonesia Barat)
             points_utm = points_gdf.to_crs(epsg=utm_epsg)
             
-            # Proses clustering
+            # Proses clustering dan pembuatan FAT area
             max_hp = st.slider("Maksimal HP per FAT area", 1, 20, 16)
             max_dist = st.slider("Jarak maksimal dalam cluster (meter)", 50, 200, 100)
             
@@ -68,7 +74,7 @@ if uploaded_file is not None:
                         points_utm['y'] = points_utm.geometry.y
                         coords = points_utm[['x', 'y']].values
                         
-                        # Clustering dengan DBSCAN
+                        # Lakukan clustering dengan DBSCAN
                         db = DBSCAN(eps=max_dist, min_samples=1).fit(coords)
                         points_utm['cluster'] = db.labels_
                         
@@ -99,18 +105,18 @@ if uploaded_file is not None:
                             hull = multipoint.convex_hull
                             
                             if hull.geom_type == 'Polygon':
-                                # Perbaikan di sini - konversi koordinat dengan benar
                                 pol = kml.newpolygon(
                                     name=fat,
                                     description=f"{len(group)} HP",
-                                    outerboundaryis=[(coord[0], coord[1]) for coord in hull.exterior.coords]
+                                    outerboundaryis=list(hull.exterior.coords)
                                 )
                                 pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.green)
                         
-                        # Simpan ke bytes untuk download
-                        kml_bytes = BytesIO()
-                        kml.save(kml_bytes)
-                        kml_bytes.seek(0)
+                        # Simpan ke file sementara untuk download
+                        with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp_file:
+                            kml.save(tmp_file.name)
+                            with open(tmp_file.name, 'rb') as f:
+                                kml_bytes = f.read()
                         
                         st.success("Proses selesai!")
                         st.download_button(
