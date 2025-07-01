@@ -6,4 +6,4 @@ simplekml
 pyproj 
 shapely
 matplotlib
-folium
+streamlit_folium
