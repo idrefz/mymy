@@ -1,11 +1,9 @@
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import numpy as np
-from shapely.geometry import box, Point, MultiPolygon, Polygon
+from shapely.geometry import box, Point, MultiPolygon
 import simplekml
 from io import BytesIO
-import zipfile
 import math
 
 st.set_page_config(layout="wide")
@@ -20,15 +18,12 @@ def load_kml(uploaded_file):
         return None
 
 def create_aligned_grids(gdf, grid_size=15.8):
-    """Membuat grid yang sejajar dengan boundary area"""
     bounds = gdf.total_bounds
     minx, miny, maxx, maxy = bounds
     
-    # Hitung jumlah grid horizontal dan vertikal
     cols = math.ceil((maxx - minx) / grid_size)
     rows = math.ceil((maxy - miny) / grid_size)
     
-    # Buat grid yang teratur
     polygons = []
     for i in range(cols):
         for j in range(rows):
@@ -39,16 +34,13 @@ def create_aligned_grids(gdf, grid_size=15.8):
     return gpd.GeoDataFrame(geometry=polygons, crs=gdf.crs)
 
 def create_fat_areas_aligned(grid_with_hp, gdf):
-    """Membuat FAT area yang sejajar dan teratur"""
     fat_areas = []
     homepass_groups = {}
     fat_index = 1
     
-    # Identifikasi baris grid
     grid_with_hp['row'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.y / 15.8)))
     grid_with_hp['col'] = grid_with_hp.geometry.apply(lambda g: int(round(g.centroid.x / 15.8)))
     
-    # Urutkan berdasarkan baris dan kolom
     grid_sorted = grid_with_hp.sort_values(['row', 'col'])
     
     current_fat = []
@@ -59,9 +51,7 @@ def create_fat_areas_aligned(grid_with_hp, gdf):
         if current_row is None:
             current_row = row['row']
         
-        # Jika pindah baris atau sudah mencapai 16 HP
         if row['row'] != current_row or (current_hp + row['homepass'] > 16 and current_hp > 0):
-            # Simpan FAT area sebelumnya
             if current_fat:
                 combined_geom = MultiPolygon(current_fat).convex_hull
                 fat_areas.append({
@@ -71,7 +61,6 @@ def create_fat_areas_aligned(grid_with_hp, gdf):
                     'color': 'green' if current_hp >= 16 else 'red'
                 })
                 
-                # Kelompokkan Homepass
                 points_in_fat = gdf[gdf.geometry.within(combined_geom)]
                 homepass_groups[f'FAT {fat_index}'] = points_in_fat
                 
@@ -84,7 +73,6 @@ def create_fat_areas_aligned(grid_with_hp, gdf):
         current_fat.append(row['geometry'])
         current_hp += row['homepass']
     
-    # Tambahkan FAT area terakhir
     if current_fat:
         combined_geom = MultiPolygon(current_fat).convex_hull
         fat_areas.append({
@@ -133,45 +121,43 @@ if uploaded_file:
     fat_areas, homepass_groups = create_fat_areas_aligned(grid_with_hp, gdf)
     fat_areas_wgs = fat_areas.to_crs(epsg=4326)
     
-    # Buat ZIP output
-    with BytesIO() as zip_buffer:
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # 1. FAT AREA
-            kml_fat = simplekml.Kml()
-            for _, row in fat_areas_wgs.iterrows():
-                poly = kml_fat.newpolygon(name=row['label'])
-                poly.style.polystyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
-                poly.style.linestyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
-                poly.style.linestyle.width = 2
-                
-                if hasattr(row.geometry, 'geoms'):  # MultiPolygon
-                    for geom in row.geometry.geoms:
-                        poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
-                else:  # Polygon
-                    poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
-                
-                poly.description = f"Jumlah HP: {row['homepass']}"
-            
-            zipf.writestr("FAT AREA/fat_areas.kml", kml_fat.kml())
-            
-            # 2. HOMEPASS per FAT AREA
-            for fat_name, points in homepass_groups.items():
-                kml_hp = simplekml.Kml()
-                points_wgs = points.to_crs(epsg=4326)
-                
-                for _, point in points_wgs.iterrows():
-                    pnt = kml_hp.newpoint(name=f"HP-{fat_name}")
-                    pnt.coords = [(point.geometry.x, point.geometry.y)]
-                
-                zipf.writestr(f"HOMEPASS/{fat_name}/homepass.kml", kml_hp.kml())
+    # Buat KML dengan struktur folder
+    kml = simplekml.Kml()
+    
+    # Folder FAT AREA
+    fat_folder = kml.newfolder(name="FAT AREA")
+    for _, row in fat_areas_wgs.iterrows():
+        poly = fat_folder.newpolygon(name=row['label'])
+        poly.style.polystyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
+        poly.style.linestyle.color = simplekml.Color.green if row['color'] == 'green' else simplekml.Color.red
+        poly.style.linestyle.width = 2
         
-        # Download button
-        st.download_button(
-            "⬇️ Download All Data (ZIP)",
-            zip_buffer.getvalue(),
-            "fat_homepass_data.zip",
-            "application/zip"
-        )
+        if hasattr(row.geometry, 'geoms'):
+            for geom in row.geometry.geoms:
+                poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
+        else:
+            poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
+        
+        poly.description = f"Jumlah HP: {row['homepass']}"
+    
+    # Folder HOMEPASS
+    hp_folder = kml.newfolder(name="HOMEPASS")
+    for fat_name, points in homepass_groups.items():
+        fat_hp_folder = hp_folder.newfolder(name=fat_name)
+        points_wgs = points.to_crs(epsg=4326)
+        
+        for _, point in points_wgs.iterrows():
+            pnt = fat_hp_folder.newpoint(name=f"HP-{fat_name}")
+            pnt.coords = [(point.geometry.x, point.geometry.y)]
+    
+    # Download KML
+    kml_bytes = BytesIO(kml.kml().encode('utf-8'))
+    st.download_button(
+        "⬇️ Download KML dengan Struktur Folder",
+        kml_bytes.getvalue(),
+        "fat_homepass_structured.kml",
+        "application/vnd.google-earth.kml+xml"
+    )
     
     # Tampilkan statistik
     st.subheader("📊 Statistik FAT AREA")
