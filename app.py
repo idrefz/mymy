@@ -1,9 +1,9 @@
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import box, Point
+from shapely.geometry import box, Point, MultiPolygon, Polygon
 import simplekml
-from io import BytesIO, StringIO
+from io import BytesIO
 import tempfile
 
 st.set_page_config(layout="wide")
@@ -20,6 +20,44 @@ def load_kml(uploaded_file):
     except Exception as e:
         st.error(f"Gagal memuat KML: {str(e)}")
         return None
+
+def create_fat_grids(grid_with_hp):
+    """Menggabungkan grid menjadi FAT grid berisi 16 HP"""
+    fat_grids = []
+    current_fat = []
+    current_count = 0
+    fat_index = 1
+    
+    # Urutkan grid berdasarkan jumlah HP (descending)
+    sorted_grid = grid_with_hp.sort_values('homepass', ascending=False)
+    
+    for _, row in sorted_grid.iterrows():
+        if current_count + row['homepass'] <= 16:
+            current_fat.append(row['geometry'])
+            current_count += row['homepass']
+        else:
+            if current_fat:
+                # Gabungkan grid menjadi satu polygon
+                combined = MultiPolygon(current_fat).convex_hull
+                fat_grids.append({
+                    'geometry': combined,
+                    'homepass': current_count,
+                    'label': f'FAT {fat_index}'
+                })
+                fat_index += 1
+                current_fat = [row['geometry']]
+                current_count = row['homepass']
+    
+    # Tambahkan sisa grid terakhir
+    if current_fat:
+        combined = MultiPolygon(current_fat).convex_hull
+        fat_grids.append({
+            'geometry': combined,
+            'homepass': current_count,
+            'label': f'FAT {fat_index}'
+        })
+    
+    return gpd.GeoDataFrame(fat_grids, crs=grid_with_hp.crs)
 
 # Upload file KML
 uploaded_file = st.file_uploader("📤 Upload file KML berisi titik Homepass", type=["kml"])
@@ -53,57 +91,62 @@ if uploaded_file:
     grid = gpd.GeoDataFrame(geometry=polygons, crs=gdf.crs)
 
     # Hitung titik per grid
-    grid['homepass'] = 0
-    
     joined = gpd.sjoin(grid, gdf, how='left', predicate='contains')
+    counts = joined.groupby(joined.index).size()
+    grid['homepass'] = counts.reindex(grid.index, fill_value=0).astype(int)
     
-    if not joined.empty:
-        counts = joined.groupby(joined.index).size()
-        grid['homepass'] = counts.reindex(grid.index, fill_value=0).astype(int)
+    # Filter hanya grid yang ada HP-nya
+    grid_with_hp = grid[grid['homepass'] > 0].copy()
     
-    # Tambah warna
-    grid['color'] = grid['homepass'].apply(
-        lambda x: 'green' if x <= 16 else 'red')
-
+    if len(grid_with_hp) == 0:
+        st.error("❌ Tidak ada titik Homepass yang masuk dalam grid manapun")
+        st.stop()
+    
+    # Buat FAT grid (gabungkan grid yang <16 HP)
+    fat_grids = create_fat_grids(grid_with_hp)
+    
     # Konversi ke WGS84 untuk KML
-    grid_wgs = grid.to_crs(epsg=4326)
+    fat_grids_wgs = fat_grids.to_crs(epsg=4326)
 
     # Ekspor hasil ke KML
     kml = simplekml.Kml()
     
-    for _, row in grid_wgs.iterrows():
-        poly = kml.newpolygon(name=f"{row['homepass']} titik")
-        poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
-        
-        if row['color'] == 'green':
-            poly.style.polystyle.color = simplekml.Color.green
-            poly.style.linestyle.color = simplekml.Color.green
+    for _, row in fat_grids_wgs.iterrows():
+        poly = kml.newpolygon(name=f"{row['label']} - {row['homepass']} HP")
+        # Konversi geometry ke format yang sesuai
+        if isinstance(row.geometry, MultiPolygon):
+            for geom in row.geometry.geoms:
+                poly.outerboundaryis = [(x,y) for x,y in geom.exterior.coords]
         else:
-            poly.style.polystyle.color = simplekml.Color.red
-            poly.style.linestyle.color = simplekml.Color.red
+            poly.outerboundaryis = [(x,y) for x,y in row.geometry.exterior.coords]
         
+        poly.style.polystyle.color = simplekml.Color.green
+        poly.style.linestyle.color = simplekml.Color.green
         poly.style.linestyle.width = 2
 
-    # Perbaikan penyimpanan KML
-    try:
-        # Simpan ke string dulu
-        kml_str = kml.kml()
-        
-        # Konversi ke bytes
-        kml_bytes = BytesIO(kml_str.encode('utf-8'))
-        
-        # Tombol download
-        st.download_button(
-            "⬇️ Download Grid KML",
-            kml_bytes.getvalue(),
-            "grid_homepass.kml",
-            "application/vnd.google-earth.kml+xml"
-        )
-        
-        # Tampilkan statistik singkat
-        st.write(f"Total Grid: {len(grid)}")
-        st.write(f"Grid Hijau (≤16 titik): {len(grid[grid['color'] == 'green'])}")
-        st.write(f"Grid Merah (>16 titik): {len(grid[grid['color'] == 'red'])}")
-        
-    except Exception as e:
-        st.error(f"Gagal membuat file KML: {str(e)}")
+    # Simpan ke buffer
+    kml_str = kml.kml()
+    kml_bytes = BytesIO(kml_str.encode('utf-8'))
+    
+    # Tombol download
+    st.download_button(
+        "⬇️ Download FAT Grid KML",
+        kml_bytes.getvalue(),
+        "fat_grid_homepass.kml",
+        "application/vnd.google-earth.kml+xml"
+    )
+    
+    # Tampilkan statistik
+    st.subheader("📊 Statistik FAT Grid")
+    st.write(f"Total FAT Grid: {len(fat_grids)}")
+    
+    # Tabel detail FAT Grid
+    fat_stats = []
+    for _, row in fat_grids.iterrows():
+        fat_stats.append({
+            'FAT Grid': row['label'],
+            'Jumlah HP': row['homepass'],
+            'Luas (m²)': round(row.geometry.area, 2)
+        })
+    
+    st.table(pd.DataFrame(fat_stats))
