@@ -15,15 +15,16 @@ st.title("📍 Grid Identifikasi Homepass (Max 16 per Area 250m²)")
 uploaded_file = st.file_uploader("📤 Upload file KML berisi titik Homepass", type=["kml"])
 
 if uploaded_file:
-    # Pastikan pakai fiona sebagai backend
-    gpd.options.io_engine = "fiona"
-
-    with open("uploaded.kml", "wb") as f:
-        f.write(uploaded_file.read())
-
     try:
-        gdf = gpd.read_file("uploaded.kml", driver='KML')
-        st.success("✅ KML berhasil dimuat!")
+        # Read KML directly from memory
+        gdf = gpd.read_file(uploaded_file, driver='KML')
+        
+        # Check if the file contains any data
+        if len(gdf) == 0:
+            st.error("❌ File KML tidak mengandung data titik")
+            st.stop()
+            
+        st.success(f"✅ KML berhasil dimuat! {len(gdf)} titik ditemukan")
 
         # Konversi ke UTM (zonasi otomatis)
         gdf = gdf.to_crs(epsg=32748)  # Indonesia Barat
@@ -89,4 +90,5 @@ if uploaded_file:
         st.download_button("⬇️ Download KML Hasil", kml_bytes, "grid_homepass.kml")
 
     except Exception as e:
-        st.error(f"❌ Gagal memproses file KML: {e}")
+        st.error(f"❌ Gagal memproses file KML: {str(e)}")
+        st.error("Pastikan file KML berformat benar dan mengandung data titik")
