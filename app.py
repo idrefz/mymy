@@ -18,7 +18,6 @@ def load_kml_data(uploaded_file):
         gdf = gpd.read_file(tmp_path, driver='KML')
         os.unlink(tmp_path)
         
-        # Ekstrak semua titik dengan koordinat asli
         all_points = []
         blok_names = []
         
@@ -31,10 +30,7 @@ def load_kml_data(uploaded_file):
                     all_points.append(Point(coord))
                     blok_names.append(f'Line-{idx}-{len(blok_names)}')
         
-        # Simpan dalam GeoDataFrame dengan CRS asli (WGS84)
         points_gdf = gpd.GeoDataFrame({'Blok': blok_names}, geometry=all_points, crs='EPSG:4326')
-        
-        # Tambahkan kolom longitude dan latitude asli
         points_gdf['longitude'] = points_gdf.geometry.x
         points_gdf['latitude'] = points_gdf.geometry.y
         
@@ -46,27 +42,22 @@ def load_kml_data(uploaded_file):
 
 def cluster_homepass(gdf, max_distance=100, max_per_fat=16):
     """Mengelompokkan HomePass tanpa mengubah koordinat asli"""
-    # Buat salinan data asli
     original_coords = gdf[['longitude', 'latitude']].values
     
-    # Untuk clustering, konversi ke meter (UTM)
-    utm_epsg = 32748  # UTM zone 48S (Indonesia Barat)
+    # Untuk clustering, konversi ke UTM
+    utm_epsg = 32748  # UTM zone 48S
     gdf_utm = gdf.to_crs(epsg=utm_epsg)
-    
-    # Dapatkan koordinat UTM untuk clustering
     coords_utm = np.array([(geom.x, geom.y) for geom in gdf_utm.geometry])
     
-    # Lakukan clustering dengan DBSCAN
     db = DBSCAN(eps=max_distance, min_samples=1).fit(coords_utm)
     gdf['cluster'] = db.labels_
     
-    # Assign FAT Area menggunakan koordinat asli
     fat_zones = []
     fat_id = 1
     
     for cluster_id in gdf['cluster'].unique():
         cluster = gdf[gdf['cluster'] == cluster_id]
-        cluster = cluster.sort_values('longitude')  # Urutkan berdasarkan longitude
+        cluster = cluster.sort_values('longitude')
         
         for i in range(0, len(cluster), max_per_fat):
             chunk = cluster.iloc[i:i+max_per_fat].copy()
@@ -78,27 +69,27 @@ def cluster_homepass(gdf, max_distance=100, max_per_fat=16):
     return fat_areas[['FAT_Area', 'Blok', 'longitude', 'latitude', 'geometry']]
 
 def create_structured_kml(fat_areas_df, output_filename):
-    """Membuat KML dengan koordinat asli"""
+    """Membuat KML dengan penanganan koordinat yang benar"""
     kml = simplekml.Kml()
-    
     main_folder = kml.newfolder(name="FAT Areas Coverage")
     
     for i, (fat_name, group) in enumerate(fat_areas_df.groupby('FAT_Area')):
         fat_folder = main_folder.newfolder(name=fat_name)
         
-        # Gunakan geometry asli untuk polygon boundary
-        multipoint = MultiPoint(group.geometry.tolist())
+        # Perbaikan: Gunakan list comprehension untuk koordinat
+        coords = [(point.x, point.y) for point in group.geometry]
+        multipoint = MultiPoint(coords)
         hull = multipoint.convex_hull
         
         if hull.geom_type == 'Polygon':
+            # Perbaikan: Konversi koordinat ke format yang benar
             pol = fat_folder.newpolygon(
                 name=f"{fat_name} Boundary",
                 description=f"Total {len(group)} HomePass",
-                outerboundaryis=[(p.x, p.y) for p in hull.exterior.coords]
+                outerboundaryis=list(hull.exterior.coords)
             )
             pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.green)
         
-        # Folder HomePass
         hp_folder = fat_folder.newfolder(name="HomePass")
         hh_folder = hp_folder.newfolder(name="HH")
         
@@ -115,10 +106,7 @@ def create_structured_kml(fat_areas_df, output_filename):
 def main():
     import streamlit as st
     
-    st.title("FAT Area Organizer (Preserve Coordinates)")
-    st.markdown("""
-    Aplikasi untuk mengelompokkan HomePass ke FAT Areas **tanpa mengubah koordinat asli**.
-    """)
+    st.title("FAT Area Organizer (Fixed Coordinate Handling)")
     
     uploaded_file = st.file_uploader("Upload file KML", type=['kml'])
     
@@ -132,32 +120,28 @@ def main():
         if st.button("Proses"):
             with st.spinner('Memproses...'):
                 try:
-                    # 1. Load data dengan koordinat asli
                     gdf = load_kml_data(uploaded_file)
                     if gdf is None:
                         st.error("Gagal memuat file")
                         return
                     
-                    # 2. Cluster tanpa ubah koordinat
                     fat_areas = cluster_homepass(gdf, max_dist, max_hp)
                     
-                    # 3. Buat KML
                     with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
                         create_structured_kml(fat_areas, tmp.name)
                         with open(tmp.name, 'rb') as f:
                             kml_bytes = f.read()
                     
-                    st.success("Selesai! Koordinat asli tetap dipertahankan")
+                    st.success("Proses berhasil!")
                     st.download_button(
                         label="Download KML",
                         data=kml_bytes,
-                        file_name="fat_areas_preserved_coords.kml",
+                        file_name="fat_areas_corrected.kml",
                         mime="application/vnd.google-earth.kml+xml"
                     )
                     
-                    # Tampilkan koordinat asli
-                    st.subheader("Data Koordinat Asli")
-                    st.dataframe(fat_areas[['Blok', 'longitude', 'latitude']].head())
+                    st.subheader("Preview Data")
+                    st.dataframe(fat_areas[['FAT_Area', 'Blok', 'longitude', 'latitude']].head())
                     
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
