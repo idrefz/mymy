@@ -2,7 +2,7 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point, MultiPoint, Polygon
-from sklearn.cluster import DBSCAN  # <-- Ini yang harus ditambahkan
+from sklearn.cluster import DBSCAN
 import simplekml
 from io import BytesIO
 import tempfile
@@ -10,15 +10,12 @@ import os
 
 st.title('Pengelompokan FAT Area dari KML')
 
-# Fungsi untuk membaca KML dengan fallback
 def read_kml(file):
     try:
-        # Coba baca dengan geopandas biasa
         return gpd.read_file(file, driver='KML')
     except Exception as e:
         st.warning(f"Gagal baca dengan pyogrio: {str(e)}. Mencoba metode alternatif...")
         try:
-            # Simpan ke file sementara dan baca kembali
             with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
                 tmp.write(file.getvalue())
                 tmp_path = tmp.name
@@ -34,17 +31,14 @@ def read_kml(file):
 uploaded_file = st.file_uploader("Upload file KML berisi HomePass", type=['kml'])
 
 if uploaded_file is not None:
-    # Baca file KML
     gdf = read_kml(uploaded_file)
     
     if gdf is not None and not gdf.empty:
         st.success(f"Berhasil memuat {len(gdf)} fitur")
-        
-        # Tampilkan preview data
         st.subheader("Preview Data")
         st.write(gdf.head())
         
-        # Ekstrak semua titik (handle Point dan LineString)
+        # Ekstrak semua titik
         all_points = []
         for geom in gdf.geometry:
             if geom.geom_type == 'Point':
@@ -58,11 +52,11 @@ if uploaded_file is not None:
         else:
             points_gdf = gpd.GeoDataFrame(geometry=all_points, crs=gdf.crs)
             
-            # Konversi ke UTM untuk perhitungan jarak akurat
+            # Konversi ke UTM
             utm_epsg = 32748  # UTM zone 48S (Indonesia Barat)
             points_utm = points_gdf.to_crs(epsg=utm_epsg)
             
-            # Proses clustering dan pembuatan FAT area
+            # Proses clustering
             max_hp = st.slider("Maksimal HP per FAT area", 1, 20, 16)
             max_dist = st.slider("Jarak maksimal dalam cluster (meter)", 50, 200, 100)
             
@@ -74,7 +68,7 @@ if uploaded_file is not None:
                         points_utm['y'] = points_utm.geometry.y
                         coords = points_utm[['x', 'y']].values
                         
-                        # Lakukan clustering dengan DBSCAN
+                        # Clustering dengan DBSCAN
                         db = DBSCAN(eps=max_dist, min_samples=1).fit(coords)
                         points_utm['cluster'] = db.labels_
                         
@@ -105,10 +99,11 @@ if uploaded_file is not None:
                             hull = multipoint.convex_hull
                             
                             if hull.geom_type == 'Polygon':
+                                # Perbaikan di sini - konversi koordinat dengan benar
                                 pol = kml.newpolygon(
-                                    name=fat,  # <-- Perbaikan typo dari 'fat' ke 'fat'
+                                    name=fat,
                                     description=f"{len(group)} HP",
-                                    outerboundaryis=[(p.x, p.y) for p in hull.exterior.coords]
+                                    outerboundaryis=[(coord[0], coord[1]) for coord in hull.exterior.coords]
                                 )
                                 pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.green)
                         
