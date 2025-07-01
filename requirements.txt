@@ -7,3 +7,4 @@ pyproj
 shapely
 matplotlib
 streamlit_folium
+fiona
