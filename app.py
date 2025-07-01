@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import box, Point
 import simplekml
-from io import BytesIO
+from io import BytesIO, StringIO
 import tempfile
 
 st.set_page_config(layout="wide")
@@ -84,20 +84,26 @@ if uploaded_file:
         
         poly.style.linestyle.width = 2
 
-    # Simpan ke buffer
-    kml_bytes = BytesIO()
-    kml.save(kml_bytes)
-    kml_bytes.seek(0)
-    
-    # Tombol download
-    st.download_button(
-        "⬇️ Download Grid KML",
-        kml_bytes,
-        "grid_homepass.kml",
-        "application/vnd.google-earth.kml+xml"
-    )
-
-    # Tampilkan statistik singkat
-    st.write(f"Total Grid: {len(grid)}")
-    st.write(f"Grid Hijau (≤16 titik): {len(grid[grid['color'] == 'green'])}")
-    st.write(f"Grid Merah (>16 titik): {len(grid[grid['color'] == 'red'])}")
+    # Perbaikan penyimpanan KML
+    try:
+        # Simpan ke string dulu
+        kml_str = kml.kml()
+        
+        # Konversi ke bytes
+        kml_bytes = BytesIO(kml_str.encode('utf-8'))
+        
+        # Tombol download
+        st.download_button(
+            "⬇️ Download Grid KML",
+            kml_bytes.getvalue(),
+            "grid_homepass.kml",
+            "application/vnd.google-earth.kml+xml"
+        )
+        
+        # Tampilkan statistik singkat
+        st.write(f"Total Grid: {len(grid)}")
+        st.write(f"Grid Hijau (≤16 titik): {len(grid[grid['color'] == 'green'])}")
+        st.write(f"Grid Merah (>16 titik): {len(grid[grid['color'] == 'red'])}")
+        
+    except Exception as e:
+        st.error(f"Gagal membuat file KML: {str(e)}")
