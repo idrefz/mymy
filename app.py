@@ -1,130 +1,80 @@
-import streamlit as st
-import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Point, MultiPoint, Polygon
 from sklearn.cluster import DBSCAN
+import geopandas as gpd
+from shapely.geometry import Point, MultiPoint, Polygon
 import simplekml
-from io import BytesIO, StringIO
-import tempfile
-import os
 
-st.title('Pengelompokan FAT Area dari KML')
+# Data contoh (gantikan dengan data sebenarnya dari KML)
+data = [
+    ["MR.XXXX-XX-P001", "FAT A01", "Blok A1/1"],
+    ["MR.XXXX-XX-P001", "FAT A01", "Blok A1/2"],
+    # ... tambahkan semua data lainnya ...
+    ["MR.XXXX-XX-P001", None, "Blok A2/390"]
+]
 
-def read_kml(uploaded_file):
-    """Membaca file KML yang diupload dengan penanganan error yang lebih baik"""
-    try:
-        # Coba baca langsung dari file yang diupload
-        with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
-        
-        # Baca file dengan geopandas
-        gdf = gpd.read_file(tmp_path, driver='KML')
-        
-        # Hapus file sementara
-        os.unlink(tmp_path)
-        
-        return gdf
+# Konversi ke DataFrame
+df = pd.DataFrame(data, columns=["Project", "FAT_Area", "Blok"])
+
+# 1. Identifikasi FAT Area yang sudah ada
+existing_fat_areas = df[df['FAT_Area'].notnull()][['FAT_Area', 'Blok']]
+
+# 2. Kelompokkan HP yang belum memiliki FAT Area
+unassigned = df[df['FAT_Area'].isnull()]
+
+# 3. Proses pengelompokan dengan DBSCAN (asumsi ada data koordinat)
+# Ini contoh pseudocode - Anda perlu menyesuaikan dengan data sebenarnya
+def assign_fat_areas(gdf, max_per_fat=16, max_distance=100):
+    # Konversi ke UTM untuk perhitungan jarak
+    utm_epsg = 32748  # UTM zone 48S
+    gdf_utm = gdf.to_crs(epsg=utm_epsg)
     
-    except Exception as e:
-        st.error(f"Gagal membaca file KML: {str(e)}")
-        return None
-
-# Upload file
-uploaded_file = st.file_uploader("Upload file KML berisi HomePass", type=['kml'])
-
-if uploaded_file is not None:
-    # Baca file KML
-    gdf = read_kml(uploaded_file)
+    # Dapatkan koordinat
+    coords = list(zip(gdf_utm.geometry.x, gdf_utm.geometry.y))
     
-    if gdf is not None and not gdf.empty:
-        st.success(f"Berhasil memuat {len(gdf)} fitur")
+    # Clustering
+    db = DBSCAN(eps=max_distance, min_samples=1).fit(coords)
+    gdf_utm['cluster'] = db.labels_
+    
+    # Assign FAT Area
+    fat_id = len(existing_fat_areas['FAT_Area'].unique()) + 1
+    fat_zones = []
+    
+    for cluster_id in gdf_utm['cluster'].unique():
+        cluster = gdf_utm[gdf_utm['cluster'] == cluster_id]
+        for i in range(0, len(cluster), max_per_fat):
+            chunk = cluster.iloc[i:i+max_per_fat]
+            chunk['FAT_Area'] = f'FAT A{fat_id:02d}'
+            fat_zones.append(chunk)
+            fat_id += 1
+    
+    return pd.concat(fat_zones)
+
+# 4. Gabungkan hasil dengan FAT Area yang sudah ada
+final_assignment = pd.concat([
+    existing_fat_areas,
+    assign_fat_areas(unassigned)
+])
+
+# 5. Export ke KML
+def create_fat_kml(df, output_file):
+    kml = simplekml.Kml()
+    
+    for fat_area in df['FAT_Area'].unique():
+        group = df[df['FAT_Area'] == fat_area]
         
-        # Tampilkan preview data
-        st.subheader("Preview Data")
-        st.write(gdf.head())
+        # Buat convex hull
+        points = [Point(xy) for xy in zip(group.geometry.x, group.geometry.y)]
+        multipoint = MultiPoint(points)
+        hull = multipoint.convex_hull
         
-        # Ekstrak semua titik (handle Point dan LineString)
-        all_points = []
-        for geom in gdf.geometry:
-            if geom.geom_type == 'Point':
-                all_points.append(geom)
-            elif geom.geom_type == 'LineString':
-                for coord in geom.coords:
-                    all_points.append(Point(coord))
-        
-        if not all_points:
-            st.error("Tidak ditemukan titik/garis yang valid dalam KML")
-        else:
-            points_gdf = gpd.GeoDataFrame(geometry=all_points, crs=gdf.crs)
-            
-            # Konversi ke UTM untuk perhitungan jarak akurat
-            utm_epsg = 32748  # UTM zone 48S (Indonesia Barat)
-            points_utm = points_gdf.to_crs(epsg=utm_epsg)
-            
-            # Proses clustering dan pembuatan FAT area
-            max_hp = st.slider("Maksimal HP per FAT area", 1, 20, 16)
-            max_dist = st.slider("Jarak maksimal dalam cluster (meter)", 50, 200, 100)
-            
-            if st.button("Proses Pengelompokan FAT"):
-                with st.spinner('Sedang memproses...'):
-                    try:
-                        # Dapatkan koordinat untuk clustering
-                        points_utm['x'] = points_utm.geometry.x
-                        points_utm['y'] = points_utm.geometry.y
-                        coords = points_utm[['x', 'y']].values
-                        
-                        # Lakukan clustering dengan DBSCAN
-                        db = DBSCAN(eps=max_dist, min_samples=1).fit(coords)
-                        points_utm['cluster'] = db.labels_
-                        
-                        # Kembalikan ke WGS84
-                        points_wgs = points_utm.to_crs(epsg=4326)
-                        
-                        # Buat FAT area
-                        fat_zones = []
-                        fat_id = 1
-                        
-                        for cid in points_utm['cluster'].unique():
-                            cluster = points_utm[points_utm['cluster'] == cid]
-                            cluster = cluster.sort_values('x')
-                            
-                            for i in range(0, len(cluster), max_hp):
-                                chunk = cluster.iloc[i:i+max_hp]
-                                chunk['fat'] = f'FAT A{fat_id:02d}'
-                                fat_zones.append(chunk)
-                                fat_id += 1
-                        
-                        fat_areas = pd.concat(fat_zones)
-                        
-                        # Buat polygon convex hull
-                        kml = simplekml.Kml()
-                        for fat in fat_areas['fat'].unique():
-                            group = fat_areas[fat_areas['fat'] == fat]
-                            multipoint = MultiPoint(group.geometry.tolist())
-                            hull = multipoint.convex_hull
-                            
-                            if hull.geom_type == 'Polygon':
-                                pol = kml.newpolygon(
-                                    name=fat,
-                                    description=f"{len(group)} HP",
-                                    outerboundaryis=list(hull.exterior.coords)
-                                )
-                                pol.style.polystyle.color = simplekml.Color.changealphaint(50, simplekml.Color.green)
-                        
-                        # Simpan ke file sementara untuk download
-                        with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp_file:
-                            kml.save(tmp_file.name)
-                            with open(tmp_file.name, 'rb') as f:
-                                kml_bytes = f.read()
-                        
-                        st.success("Proses selesai!")
-                        st.download_button(
-                            label="Download FAT Areas KML",
-                            data=kml_bytes,
-                            file_name="fat_areas.kml",
-                            mime="application/vnd.google-earth.kml+xml"
-                        )
-                        
-                    except Exception as e:
-                        st.error(f"Error saat pemrosesan: {str(e)}")
+        if hull.geom_type == 'Polygon':
+            pol = kml.newpolygon(
+                name=fat_area,
+                description=f"{len(group)} HP",
+                outerboundaryis=list(hull.exterior.coords)
+            )
+    
+    kml.save(output_file)
+
+# Contoh penggunaan (diasumsikan gdf adalah GeoDataFrame dari KML)
+# create_fat_kml(final_assignment, "fat_areas.kml")
