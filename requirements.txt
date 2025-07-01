@@ -6,3 +6,4 @@ simplekml
 pyproj 
 shapely
 matplotlib
+folium
